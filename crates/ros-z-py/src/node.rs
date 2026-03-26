@@ -1,6 +1,7 @@
 use crate::action::{PyZActionClient, PyZActionServer, get_tokio_rt};
 use crate::error::IntoPyErr;
 use crate::graph::GraphQueries;
+use crate::payload_view::ZPayloadView;
 use crate::pubsub::{PyZPublisher, PyZSubscriber};
 use crate::qos::extract_qos;
 use crate::raw_bytes::{RawBytesAction, RawBytesCdrSerdes, RawBytesMessage, RawBytesService};
@@ -158,6 +159,19 @@ pub struct PyZNode {
     next_sub_id: u64,
 }
 
+impl PyZNode {
+    fn register_owned_subscriber<T: Any + Send>(
+        &mut self,
+        zsub: T,
+        type_name: String,
+    ) -> PyZSubscriber {
+        let id = self.next_sub_id;
+        self.next_sub_id += 1;
+        self.owned_subs.push((id, Box::new(zsub)));
+        PyZSubscriber::new_callback(type_name, id)
+    }
+}
+
 #[allow(unsafe_op_in_unsafe_fn)]
 #[pymethods]
 impl PyZNode {
@@ -209,7 +223,9 @@ impl PyZNode {
     /// Create a subscriber for a given topic and message type.
     ///
     /// Works with any registered message type — no factory limitations.
-    #[pyo3(signature = (topic, msg_type, qos=None, callback=None))]
+    /// If `callback` is provided, `raw=False` (default) delivers a deserialized
+    /// Python message object and `raw=True` delivers a `ZPayloadView`.
+    #[pyo3(signature = (topic, msg_type, qos=None, callback=None, raw=false))]
     fn create_subscriber(
         &mut self,
         _py: Python,
@@ -217,6 +233,7 @@ impl PyZNode {
         msg_type: &Bound<'_, PyAny>,
         qos: Option<&Bound<'_, PyAny>>,
         callback: Option<PyObject>,
+        raw: bool,
     ) -> PyResult<PyZSubscriber> {
         let (msg_type_str, type_info) = extract_type_info_from_class(msg_type)?;
         let qos_profile = extract_qos(qos)?;
@@ -232,29 +249,50 @@ impl PyZNode {
             // The ZSub handle is stored in owned_subs so it lives as long as the node,
             // matching rmw_zenoh_cpp's NodeData::subs_ pattern. The caller does not
             // need to assign the returned PyZSubscriber to keep the subscription active.
-            let type_name = msg_type_str.clone();
-            let zsub = sub_builder
-                .build_with_callback(move |raw_msg: RawBytesMessage| {
-                    let payload = raw_msg.0;
-                    Python::with_gil(|py| {
-                        match ros_z_msgs::deserialize_from_cdr(&type_name, py, &payload) {
-                            Ok(obj) => {
-                                if let Err(e) = py_callback.call1(py, (obj,)) {
+            let callback_type_name = msg_type_str.clone();
+            let zsub = if raw {
+                sub_builder
+                    .build_with_raw_callback(move |sample| {
+                        Python::with_gil(|py| match Py::new(py, ZPayloadView::new(sample)) {
+                            Ok(raw_view) => {
+                                if let Err(e) = py_callback.call1(py, (raw_view,)) {
                                     eprintln!("ros_z_py: callback error: {}", e);
                                 }
                             }
                             Err(e) => {
-                                eprintln!("ros_z_py: deserialization error in callback: {}", e);
+                                eprintln!("ros_z_py: failed to create raw callback view: {}", e);
                             }
-                        }
-                    });
-                })
-                .map_err(|e| e.into_pyerr())?;
+                        });
+                    })
+                    .map_err(|e| e.into_pyerr())?
+            } else {
+                sub_builder
+                    .build_with_callback(move |raw_msg: RawBytesMessage| {
+                        let payload = raw_msg.0;
+                        Python::with_gil(|py| {
+                            match ros_z_msgs::deserialize_from_cdr(
+                                &callback_type_name,
+                                py,
+                                &payload,
+                            ) {
+                                Ok(obj) => {
+                                    if let Err(e) = py_callback.call1(py, (obj,)) {
+                                        eprintln!("ros_z_py: callback error: {}", e);
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "ros_z_py: deserialization error in callback: {}",
+                                        e
+                                    );
+                                }
+                            }
+                        });
+                    })
+                    .map_err(|e| e.into_pyerr())?
+            };
 
-            let id = self.next_sub_id;
-            self.next_sub_id += 1;
-            self.owned_subs.push((id, Box::new(zsub)));
-            Ok(PyZSubscriber::new_callback(msg_type_str, id))
+            Ok(self.register_owned_subscriber(zsub, msg_type_str))
         } else {
             let zsub = sub_builder.build().map_err(|e| e.into_pyerr())?;
             let wrapper = GenericSubWrapper::new(zsub);

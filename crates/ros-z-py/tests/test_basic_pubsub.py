@@ -119,6 +119,41 @@ def test_destroy_subscriber(node, pub):
     )
 
 
+def test_raw_callback_subscriber(node):
+    """Callback subscribers should deliver a raw payload view when raw=True."""
+    pub_in = node.create_publisher("/raw_callback_in", std_msgs.String)
+    pub_out = node.create_publisher("/raw_callback_out", std_msgs.String)
+    sub_out = node.create_subscriber("/raw_callback_out", std_msgs.String)
+    received = []
+
+    def on_raw(raw_view):
+        received.append(raw_view)
+        pub_out.publish_raw(raw_view)
+
+    sub_in = node.create_subscriber(
+        "/raw_callback_in", std_msgs.String, callback=on_raw, raw=True
+    )
+
+    time.sleep(0.3)
+    pub_in.publish(std_msgs.String(data="raw_callback_test"))
+    time.sleep(0.3)
+
+    assert len(received) == 1, f"Expected 1 raw callback, got {len(received)}"
+    assert isinstance(received[0], ros_z_py.ZPayloadView), (
+        f"Expected ZPayloadView, got {type(received[0])}"
+    )
+    assert len(received[0]) > 0, "Expected non-empty serialized payload"
+    assert memoryview(received[0]).readonly is True
+
+    msg = sub_out.recv(timeout=2.0)
+    assert msg is not None, "No forwarded message received"
+    assert msg.data == "raw_callback_test", (
+        f"Expected 'raw_callback_test', got '{msg.data}'"
+    )
+
+    node.destroy_subscriber(sub_in)
+
+
 def test_error_handling(node):
     """Test error handling for invalid message types."""
     print("Testing error handling...")
@@ -146,6 +181,7 @@ def main():
     test_error_handling(node)
     test_callback_subscriber_no_assign(node, pub)
     test_destroy_subscriber(node, pub)
+    test_raw_callback_subscriber(node)
 
     print("=" * 60)
     print("All tests passed! ✓")

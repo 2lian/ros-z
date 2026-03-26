@@ -84,6 +84,14 @@ impl ZPayloadView {
     pub fn is_zero_copy(&self) -> bool {
         matches!(self.bytes, PayloadBytes::Borrowed { .. })
     }
+
+    /// Clone the underlying Zenoh payload handle without materializing bytes.
+    ///
+    /// This is a cheap `ZBytes`/`ZBuf` clone which preserves Zenoh's internal
+    /// sharing. Unlike `to_bytes()`, it does not flatten or copy the payload.
+    pub fn zbytes(&self) -> zenoh::bytes::ZBytes {
+        self.sample.payload().clone()
+    }
 }
 
 #[pymethods]

@@ -892,6 +892,18 @@ where
         self.build_internal(DataHandler::Callback(callback), None)
     }
 
+    /// Build a subscriber with a callback that processes raw samples directly.
+    ///
+    /// This bypasses message deserialization and lets binding layers reuse the
+    /// incoming payload as a zero-copy view when possible.
+    pub fn build_with_raw_callback<F>(self, callback: F) -> Result<ZSub<T, (), S>>
+    where
+        F: Fn(Sample) + Send + Sync + 'static,
+        S: ZDeserializer,
+    {
+        self.build_internal(DataHandler::Callback(Arc::new(callback)), None)
+    }
+
     #[cfg(feature = "rmw")]
     pub fn build_with_notifier<F>(self, notify: F) -> Result<ZSub<T, Sample, S>>
     where

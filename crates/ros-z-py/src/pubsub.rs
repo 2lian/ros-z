@@ -1,6 +1,8 @@
 use crate::error::IntoPyErr;
 use crate::payload_view::ZPayloadView;
 use crate::traits::{RawPublisher, RawSubscriber};
+use pyo3::buffer::PyBuffer;
+use pyo3::exceptions::PyBufferError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use std::time::Duration;
@@ -32,12 +34,28 @@ impl PyZPublisher {
         self.inner.publish(zbuf.into()).map_err(|e| e.into_pyerr())
     }
 
-    /// Publish pre-serialized CDR bytes directly
+    /// Publish pre-serialized CDR data directly.
     ///
-    /// Use this for zero-copy forwarding of received messages (e.g., in a pong responder).
-    /// The bytes should be in CDR format (as returned by recv_serialized/try_recv_serialized).
-    fn publish_raw(&self, data: &[u8]) -> PyResult<()> {
-        self.inner.publish(data.into()).map_err(|e| e.into_pyerr())
+    /// Accepts a `ZPayloadView` for zero-copy forwarding of the underlying
+    /// Zenoh payload handle, or any contiguous
+    /// Python buffer object (`bytes`, `bytearray`, `memoryview`, etc.).
+    fn publish_raw(&self, py: Python, data: &Bound<'_, PyAny>) -> PyResult<()> {
+        if let Ok(view) = data.extract::<PyRef<'_, ZPayloadView>>() {
+            return self.inner.publish(view.zbytes()).map_err(|e| e.into_pyerr());
+        }
+
+        let buffer = PyBuffer::<u8>::get_bound(data)?;
+        if !buffer.is_c_contiguous() {
+            return Err(PyBufferError::new_err(
+                "publish_raw requires a contiguous buffer",
+            ));
+        }
+
+        let slice = unsafe {
+            std::slice::from_raw_parts(buffer.buf_ptr() as *const u8, buffer.len_bytes())
+        };
+        let _ = py;
+        self.inner.publish(slice.into()).map_err(|e| e.into_pyerr())
     }
 
     /// Get the topic name (for debugging)
@@ -66,6 +84,8 @@ impl PyZSubscriber {
     }
 
     /// Create a callback-based subscriber (no queue).
+    /// The callback may receive a raw payload view or deserialized Python objects,
+    /// depending on the `raw` flag used when creating it from the node.
     /// The subscriber handle is owned by the node under `id`.
     pub fn new_callback(type_name: String, id: u64) -> Self {
         Self {

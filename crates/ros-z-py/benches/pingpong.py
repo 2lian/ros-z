@@ -213,11 +213,11 @@ def benchmark_callback_echo(
     pub_pong = node.create_publisher("/bench_pong_cb", std_msgs.ByteMultiArray)
     sub_pong = node.create_subscriber("/bench_pong_cb", std_msgs.ByteMultiArray)
 
-    def on_ping(raw_bytes: bytes):
-        pub_pong.publish_raw(raw_bytes)
+    def on_ping(raw_view):
+        pub_pong.publish_raw(raw_view)
 
-    sub_ping = node.create_subscriber_with_raw_callback(
-        "/bench_ping_cb", std_msgs.ByteMultiArray, on_ping
+    sub_ping = node.create_subscriber(
+        "/bench_ping_cb", std_msgs.ByteMultiArray, callback=on_ping, raw=True
     )
 
     time.sleep(0.3)
